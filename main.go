@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/mux"
 
@@ -23,8 +24,6 @@ type User struct {
 	Email string `json:"email,omitempty"`
 }
 
-var users []User
-
 func main() {
 	// Initialize the router
 	router := mux.NewRouter()
@@ -37,30 +36,51 @@ func main() {
 	defer db.Close()
 
 	// Register routes
-	registerRoutes(router, db)
+	registerRoutes(router, db, loggingMiddleware)
 
 	// Start the HTTP server
 	log.Fatal(http.ListenAndServe(":8000", router))
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		// Log the request method and URL path
+		log.Printf("Received %s request for %s", r.Method, r.URL.Path)
+
+		// Call the next handler in the chain
+		next.ServeHTTP(w, r)
+
+		// Log the request duration
+		log.Printf("Request processed in %v", time.Since(start))
+	})
 }
 
 func connectToDatabase() (*sql.DB, error) {
 	// Open a connection to the MySQL database
 	db, err := sql.Open("mysql", "root:Fastrack@123@tcp(localhost:3306)/userData")
 	if err != nil {
-		return nil, err
+		log.Fatal("Error opening database connection:", err)
 	}
+	// defer db.Close()
+
+	// Set connection pool parameters
+	db.SetMaxOpenConns(10) // Maximum number of open connections
+	db.SetMaxIdleConns(5)  // Maximum number of idle connections
 
 	// Ping the database to check if the connection is successful
 	err = db.Ping()
 	if err != nil {
-		return nil, err
+		log.Fatal("Error testing database connection:", err)
 	}
 
-	log.Println("Successfully connected to the database!")
+	fmt.Println("Database connection successful")
+
 	return db, nil
 }
 
-func registerRoutes(router *mux.Router, db *sql.DB) {
+func registerRoutes(router *mux.Router, db *sql.DB, middleware mux.MiddlewareFunc) {
 	// Define routes
 	router.HandleFunc("/api/v1/users", func(w http.ResponseWriter, r *http.Request) { getUsers(w, r, db) }).Methods("GET")
 	router.HandleFunc("/api/v1/users/{id}", func(w http.ResponseWriter, r *http.Request) { getUser(w, r, db) }).Methods("GET")
@@ -68,6 +88,9 @@ func registerRoutes(router *mux.Router, db *sql.DB) {
 	router.HandleFunc("/api/v1/users/{id}", func(w http.ResponseWriter, r *http.Request) { updateUser(w, r, db) }).Methods("PUT")
 	router.HandleFunc("/api/v1/users/{id}", func(w http.ResponseWriter, r *http.Request) { deleteUser(w, r, db) }).Methods("DELETE")
 	router.HandleFunc("/api/v1/users/{id}", func(w http.ResponseWriter, r *http.Request) { patchUser(w, r, db) }).Methods("PATCH")
+
+	// Apply middleware to all routes
+	router.Use(middleware)
 }
 
 func handleDBError(w http.ResponseWriter, err error, errorMessage string) {
@@ -125,7 +148,16 @@ func getUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	// Query the database to get the user by ID
 	var user User
 
-	err := db.QueryRow("SELECT id, name, age, email FROM users WHERE id = ? OR name = ? OR email = ?", userID, userID, userID).Scan(&user.ID, &user.Name, &user.Age, &user.Email)
+	// Prepare the SQL statement with placeholders
+	stmt, err := db.Prepare("SELECT id, name, age, email FROM users WHERE id = ? OR name = ? OR email = ?")
+	if err != nil {
+		handleDBError(w, err, "Failed to prepare SQL statement")
+		return
+	}
+	defer stmt.Close()
+
+	// Execute the prepared statement with parameters
+	err = stmt.QueryRow(userID, userID, userID).Scan(&user.ID, &user.Name, &user.Age, &user.Email)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -148,9 +180,9 @@ func createUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 
 	var user User
 	err := json.NewDecoder(r.Body).Decode(&user)
-
 	if err != nil {
 		http.Error(w, `{"success": false, "message": "Failed to decode request body"}`, http.StatusBadRequest)
+		log.Println("Failed to decode request body:", err)
 		return
 	}
 
@@ -161,10 +193,34 @@ func createUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
-	// Insert user data into the database
-	_, err = tx.Exec("INSERT INTO users (name, age, email) VALUES (?, ?, ?)", user.Name, user.Age, user.Email)
+	// Prepare the SQL statement with placeholders
+	stmt, err := tx.Prepare("INSERT INTO users (name, age, email) VALUES (?, ?, ?)")
 	if err != nil {
-		http.Error(w, `{"success": false, "message": "Failed to insert into database"}`, http.StatusInternalServerError)
+		handleDBError(w, err, "Failed to prepare SQL statement")
+		tx.Rollback() // Rollback the transaction on error
+		return
+	}
+	defer stmt.Close()
+
+	// Insert user data into the database
+	// Execute the prepared statement with parameters
+	result, err := stmt.Exec(user.Name, user.Age, user.Email)
+	if err != nil {
+		handleDBError(w, err, "Failed to execute SQL statement")
+		tx.Rollback() // Rollback the transaction on error
+		return
+	}
+
+	// Check the number of rows affected by the insert operation
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		handleDBError(w, err, "Failed to check rows affected after insert")
+		tx.Rollback() // Rollback the transaction on error
+		return
+	}
+
+	if rowsAffected == 0 {
+		http.Error(w, `{"success": false, "message": "No rows affected after insert"}`, http.StatusInternalServerError)
 		tx.Rollback() // Rollback the transaction on error
 		return
 	}
@@ -208,10 +264,19 @@ func updateUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
-	// Execute the UPDATE query to update the user in the database
-	result, err := tx.Exec("UPDATE users SET name = ?, age = ?, email = ? WHERE id = ?", user.Name, user.Age, user.Email, userID)
+	// Prepare the SQL statement with placeholders
+	stmt, err := tx.Prepare("UPDATE users SET name = ?, age = ?, email = ? WHERE id = ?")
 	if err != nil {
-		handleDBError(w, err, `{"success": false, "message": "Failed to update user in database"}`)
+		handleDBError(w, err, "Failed to prepare SQL statement")
+		tx.Rollback() // Rollback the transaction on error
+		return
+	}
+	defer stmt.Close()
+
+	// Execute the UPDATE query to update the user in the database
+	result, err := stmt.Exec(user.Name, user.Age, user.Email, userID)
+	if err != nil {
+		handleDBError(w, err, `{"success": false, "message": "message": "Failed to update user in database"}`)
 		tx.Rollback() // Rollback the transaction on error
 		return
 	}
@@ -254,10 +319,19 @@ func deleteUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
+	stmt, err := tx.Prepare("DELETE FROM users WHERE id = ?")
+	if err != nil {
+		handleDBError(w, err, "Failed to prepare SQL statement")
+		tx.Rollback() // Rollback the transaction on error
+		return
+	}
+	defer stmt.Close()
+
 	// Query the database to get the user by ID
-	result, err := tx.Exec("DELETE FROM users WHERE id = ?", userID)
+	result, err := stmt.Exec(userID)
 	if err != nil {
 		handleDBError(w, err, `{"success": false, "message": "Failed to delete user from database"}`)
+		tx.Rollback() // Rollback the transaction on error
 		return
 	}
 
@@ -308,6 +382,7 @@ func patchUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	// Construct the SQL query to update the user based on the provided updates
 	var query string
 	var args []interface{}
+
 	query = "UPDATE users SET "
 	for key, value := range updates {
 		query += key + "=?, "
@@ -330,8 +405,19 @@ func patchUser(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 
+	// Prepare the SQL statement with placeholders
+	stmt, err := tx.Prepare(query)
+
+	if err != nil {
+		handleDBError(w, err, "Failed to prepare SQL statement")
+		tx.Rollback() // Rollback the transaction on error
+		return
+	}
+	defer stmt.Close()
+
 	// Execute the UPDATE query to update the user in the database
-	_, err = tx.Exec(query, args...)
+	_, err = stmt.Exec(args...)
+
 	if err != nil {
 		handleDBError(w, err, `{"success": false, "message": "Failed to update user in database"}`)
 		tx.Rollback() // Rollback the transaction on error
