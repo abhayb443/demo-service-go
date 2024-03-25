@@ -5,6 +5,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
@@ -40,5 +41,5 @@ func main() {
 	registerRoutes(router, db, loggingMiddleware)
 
 	// Start the HTTP server
-	log.Fatal(http.ListenAndServe(":8000", router))
+	log.Fatal(http.ListenAndServe(":"+os.Getenv("PORT_NUMBER"), router))
 }
