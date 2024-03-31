@@ -7,6 +7,7 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// Pass db connections and common thing from middleware
 func registerRoutes(router *mux.Router, db *sql.DB, middleware mux.MiddlewareFunc) {
 	// Define routes
 	router.HandleFunc("/api/v1/users", func(w http.ResponseWriter, r *http.Request) { getUsers(w, r, db) }).Methods("GET")
@@ -15,6 +16,7 @@ func registerRoutes(router *mux.Router, db *sql.DB, middleware mux.MiddlewareFun
 	router.HandleFunc("/api/v1/users/{id}", func(w http.ResponseWriter, r *http.Request) { updateUser(w, r, db) }).Methods("PUT")
 	router.HandleFunc("/api/v1/users/{id}", func(w http.ResponseWriter, r *http.Request) { deleteUser(w, r, db) }).Methods("DELETE")
 	router.HandleFunc("/api/v1/users/{id}", func(w http.ResponseWriter, r *http.Request) { patchUser(w, r, db) }).Methods("PATCH")
+	router.HandleFunc("/api/v1/health", getHealth).Methods("GET")
 
 	// Apply middleware to all routes
 	router.Use(middleware)

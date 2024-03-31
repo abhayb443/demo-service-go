@@ -353,3 +353,9 @@ func handleDBError(w http.ResponseWriter, err error, errorMessage string) {
 	http.Error(w, errorMessage, http.StatusInternalServerError)
 	log.Println(errorMessage+":", err)
 }
+
+func getHealth(w http.ResponseWriter, r *http.Request) {
+	log.Println("Health started...")
+	json.NewEncoder(w).Encode("Hello from Golang Demo Service")
+	log.Println("get all user completed...")
+}

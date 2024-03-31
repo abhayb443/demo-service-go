@@ -32,7 +32,8 @@ func connectToDatabase() (*sql.DB, error) {
 	// Ping the database to check if the connection is successful
 	err = db.Ping()
 	if err != nil {
-		log.Fatal("Error testing database connection:", err)
+		// log.Fatal("Error testing database connection:", err)
+		fmt.Println("Database connection unsuccessful")
 	}
 
 	fmt.Println("Database connection successful")
